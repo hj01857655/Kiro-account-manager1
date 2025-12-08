@@ -73,6 +73,8 @@ jobs:
           path: |
             ${{ env.WORKING_DIR }}/dist/*.exe
             ${{ env.WORKING_DIR }}/dist/*.zip
+            ${{ env.WORKING_DIR }}/dist/*.yml
+            ${{ env.WORKING_DIR }}/dist/*.blockmap
           if-no-files-found: ignore
 
   build-windows-arm64:
@@ -110,6 +112,8 @@ jobs:
           path: |
             ${{ env.WORKING_DIR }}/dist/*.exe
             ${{ env.WORKING_DIR }}/dist/*.zip
+            ${{ env.WORKING_DIR }}/dist/*.yml
+            ${{ env.WORKING_DIR }}/dist/*.blockmap
           if-no-files-found: ignore
 
   build-macos:
@@ -158,6 +162,8 @@ jobs:
           path: |
             ${{ env.WORKING_DIR }}/dist/*.dmg
             ${{ env.WORKING_DIR }}/dist/*.zip
+            ${{ env.WORKING_DIR }}/dist/*.yml
+            ${{ env.WORKING_DIR }}/dist/*.blockmap
           if-no-files-found: ignore
 
   build-linux:
@@ -219,6 +225,8 @@ jobs:
             ${{ env.WORKING_DIR }}/dist/*.deb
             ${{ env.WORKING_DIR }}/dist/*.snap
             ${{ env.WORKING_DIR }}/dist/*.tar.gz
+            ${{ env.WORKING_DIR }}/dist/*.yml
+            ${{ env.WORKING_DIR }}/dist/*.blockmap
           if-no-files-found: ignore
 
   release:
@@ -257,5 +265,7 @@ jobs:
             artifacts/**/*.deb
             artifacts/**/*.snap
             artifacts/**/*.tar.gz
+            artifacts/**/*.yml
+            artifacts/**/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,6 +4,7 @@
   "description": "Kiro Account Manager - Manage your Kiro accounts, usage and subscriptions",
   "main": "./out/main/index.js",
   "author": "Kiro",
+  "license": "MIT",
   "homepage": "https://kiro.dev",
   "scripts": {
     "format": "prettier --write .",
@@ -23,6 +24,7 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "electron-updater": "^6.3.9",
     "@tailwindcss/vite": "^4.1.17",
     "@tanstack/react-virtual": "^3.13.12",
     "cbor-x": "^1.6.0",

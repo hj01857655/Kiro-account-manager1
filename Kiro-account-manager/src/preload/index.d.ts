@@ -363,22 +363,25 @@ interface KiroApi {
   // 检查更新
   checkForUpdates: () => Promise<{
     hasUpdate: boolean
-    currentVersion?: string
-    latestVersion?: string
-    releaseNotes?: string
-    releaseName?: string
-    releaseUrl?: string
-    publishedAt?: string
-    assets?: Array<{
-      name: string
-      downloadUrl: string
-      size: number
-    }>
+    version?: string
+    releaseDate?: string
+    message?: string
     error?: string
   }>
 
-  // 打开发布页面
-  openReleasePage: (url: string) => Promise<void>
+  // 下载更新
+  downloadUpdate: () => Promise<{ success: boolean; error?: string }>
+
+  // 安装更新并重启
+  installUpdate: () => Promise<void>
+
+  // 监听更新事件
+  onUpdateChecking: (callback: () => void) => () => void
+  onUpdateAvailable: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => () => void
+  onUpdateNotAvailable: (callback: (info: { version: string }) => void) => () => void
+  onUpdateDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => () => void
+  onUpdateDownloaded: (callback: (info: { version: string; releaseDate?: string; releaseNotes?: string }) => void) => () => void
+  onUpdateError: (callback: (error: string) => void) => () => void
 }
 
 declare global {
