@@ -7,6 +7,7 @@ interface AccountData {
   activeAccountId: string | null
   autoRefreshEnabled: boolean
   autoRefreshInterval: number
+  autoRefreshConcurrency?: number
   statusCheckInterval: number
   privacyMode?: boolean
   proxyEnabled?: boolean
@@ -120,6 +121,22 @@ interface KiroApi {
   refreshAccountToken: (account: unknown) => Promise<RefreshResult>
   checkAccountStatus: (account: unknown) => Promise<StatusResult>
   
+  // 后台批量刷新（主进程执行，不阻塞 UI）
+  backgroundBatchRefresh: (accounts: Array<{
+    id: string
+    email: string
+    credentials: {
+      refreshToken: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      accessToken?: string
+    }
+  }>, concurrency?: number) => Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }>
+  onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void) => () => void
+  onBackgroundRefreshResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void) => () => void
+  
   // 切换账号 - 写入凭证到本地 SSO 缓存
   switchAccount: (credentials: {
     accessToken: string
@@ -133,7 +150,7 @@ interface KiroApi {
 
   // 文件操作
   exportToFile: (data: string, filename: string) => Promise<boolean>
-  importFromFile: () => Promise<string | null>
+  importFromFile: () => Promise<{ content: string; format: string } | null>
 
   // 验证凭证并获取账号信息
   verifyAccountCredentials: (credentials: {

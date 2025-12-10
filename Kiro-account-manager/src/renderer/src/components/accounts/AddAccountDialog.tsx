@@ -59,7 +59,7 @@ type ImportMode = 'oidc' | 'sso' | 'login'
 type LoginType = 'builderid' | 'google' | 'github'
 
 export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): React.ReactNode {
-  const { addAccount, accounts } = useAccountsStore()
+  const { addAccount, accounts, batchImportConcurrency } = useAccountsStore()
 
   // 检查账户是否已存在
   const isAccountExists = (email: string, userId: string): boolean => {
@@ -413,7 +413,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     setError(null)
     setBatchImportResult(null)
 
-    const importResult = { total: tokens.length, success: 0, failed: 0, errors: [] as string[] }
+    const importResult = { total: tokens.length, success: 0, failed: 0, errors: [] as string[], failedIndices: [] as number[] }
 
     // 单个 Token 导入函数
     const importSingleToken = async (token: string, index: number): Promise<void> => {
@@ -423,9 +423,8 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
         if (result.success && result.data) {
           const { email, userId } = result.data
           
-          // 检查账户是否已存在
+          // 检查账户是否已存在（已存在的也从输入框中移除）
           if (email && userId && isAccountExists(email, userId)) {
-            importResult.failed++
             importResult.errors.push(`#${index + 1}: ${email} 已存在`)
             return
           }
@@ -479,17 +478,29 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           importResult.success++
         } else {
           importResult.failed++
+          importResult.failedIndices.push(index)
           importResult.errors.push(`#${index + 1}: ${result.error?.message || '导入失败'}`)
         }
       } catch (e) {
         importResult.failed++
+        importResult.failedIndices.push(index)
         importResult.errors.push(`#${index + 1}: ${e instanceof Error ? e.message : '导入失败'}`)
       }
     }
 
     try {
-      // 全量并发导入
-      await Promise.allSettled(tokens.map((token, index) => importSingleToken(token, index)))
+      // 并发控制：使用配置的并发数，避免 API 限流
+      const BATCH_SIZE = batchImportConcurrency
+      for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
+        const batch = tokens.slice(i, i + BATCH_SIZE)
+        await Promise.allSettled(
+          batch.map((token, batchIndex) => importSingleToken(token, i + batchIndex))
+        )
+        // 批次间添加短暂延迟
+        if (i + BATCH_SIZE < tokens.length) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
       
       setBatchImportResult(importResult)
       
@@ -497,11 +508,17 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
       if (importResult.failed === 0) {
         resetForm()
         onClose()
-      } else if (importResult.success > 0) {
-        // 部分成功，显示结果
-        setError(`成功导入 ${importResult.success} 个，失败 ${importResult.failed} 个`)
       } else {
-        setError(`全部导入失败 (${importResult.failed} 个)`)
+        // 保留失败的 Token 在输入框中
+        const failedTokens = importResult.failedIndices.map(i => tokens[i])
+        if (failedTokens.length > 0) {
+          setSsoToken(failedTokens.join('\n'))
+        }
+        if (importResult.success > 0) {
+          setError(`成功导入 ${importResult.success} 个，失败 ${importResult.failed} 个`)
+        } else {
+          setError(`全部导入失败 (${importResult.failed} 个)`)
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'SSO 导入失败')
@@ -544,13 +561,14 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
     setError(null)
     setOidcBatchImportResult(null)
 
-    const importResult = { total: credentials.length, success: 0, failed: 0, errors: [] as string[] }
+    const importResult = { total: credentials.length, success: 0, failed: 0, errors: [] as string[], failedIndices: [] as number[] }
 
     // 单个凭证导入函数
     const importSingleCredential = async (cred: typeof credentials[0], index: number): Promise<void> => {
       try {
         if (!cred.refreshToken) {
           importResult.failed++
+          importResult.failedIndices.push(index)
           importResult.errors.push(`#${index + 1}: 缺少 refreshToken`)
           return
         }
@@ -572,7 +590,7 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           const { email, userId } = result.data
           
           if (isAccountExists(email, userId)) {
-            importResult.failed++
+            // 已存在的不记入失败，也从输入框中移除
             importResult.errors.push(`#${index + 1}: ${email} 已存在`)
             return
           }
@@ -639,27 +657,48 @@ export function AddAccountDialog({ isOpen, onClose }: AddAccountDialogProps): Re
           importResult.success++
         } else {
           importResult.failed++
-          importResult.errors.push(`#${index + 1}: 验证失败`)
+          importResult.failedIndices.push(index)
+          const err = result.error as { message?: string } | string | undefined
+          const errorMsg = typeof err === 'object' ? (err?.message || '验证失败') : (err || '验证失败')
+          importResult.errors.push(`#${index + 1}: ${errorMsg}`)
         }
       } catch (e) {
         importResult.failed++
+        importResult.failedIndices.push(index)
         importResult.errors.push(`#${index + 1}: ${e instanceof Error ? e.message : '导入失败'}`)
       }
     }
 
     try {
-      // 全量并发导入
-      await Promise.allSettled(credentials.map((cred, index) => importSingleCredential(cred, index)))
+      // 并发控制：使用配置的并发数，避免 API 限流
+      const BATCH_SIZE = batchImportConcurrency
+      for (let i = 0; i < credentials.length; i += BATCH_SIZE) {
+        const batch = credentials.slice(i, i + BATCH_SIZE)
+        await Promise.allSettled(
+          batch.map((cred, batchIndex) => importSingleCredential(cred, i + batchIndex))
+        )
+        // 批次间添加短暂延迟，进一步避免限流
+        if (i + BATCH_SIZE < credentials.length) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
       
       setOidcBatchImportResult(importResult)
       
       if (importResult.failed === 0) {
         resetForm()
         onClose()
-      } else if (importResult.success > 0) {
-        setError(`成功导入 ${importResult.success} 个，失败 ${importResult.failed} 个`)
       } else {
-        setError(`全部导入失败 (${importResult.failed} 个)`)
+        // 保留失败的凭证在输入框中
+        const failedCredentials = importResult.failedIndices.map(i => credentials[i])
+        if (failedCredentials.length > 0) {
+          setOidcBatchData(JSON.stringify(failedCredentials, null, 2))
+        }
+        if (importResult.success > 0) {
+          setError(`成功导入 ${importResult.success} 个，失败 ${importResult.failed} 个`)
+        } else {
+          setError(`全部导入失败 (${importResult.failed} 个)`)
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'OIDC 批量导入失败')

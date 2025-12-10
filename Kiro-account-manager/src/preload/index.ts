@@ -44,6 +44,44 @@ const api = {
     return ipcRenderer.invoke('check-account-status', account)
   },
 
+  // 后台批量刷新账号（在主进程执行，不阻塞 UI）
+  backgroundBatchRefresh: (accounts: Array<{
+    id: string
+    email: string
+    credentials: {
+      refreshToken: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      accessToken?: string
+    }
+  }>, concurrency?: number): Promise<{ success: boolean; completed: number; successCount: number; failedCount: number }> => {
+    return ipcRenderer.invoke('background-batch-refresh', accounts, concurrency)
+  },
+
+  // 监听后台刷新进度
+  onBackgroundRefreshProgress: (callback: (data: { completed: number; total: number; success: number; failed: number }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { completed: number; total: number; success: number; failed: number }): void => {
+      callback(data)
+    }
+    ipcRenderer.on('background-refresh-progress', handler)
+    return () => {
+      ipcRenderer.removeListener('background-refresh-progress', handler)
+    }
+  },
+
+  // 监听后台刷新结果（单个账号）
+  onBackgroundRefreshResult: (callback: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; success: boolean; data?: unknown; error?: string }): void => {
+      callback(data)
+    }
+    ipcRenderer.on('background-refresh-result', handler)
+    return () => {
+      ipcRenderer.removeListener('background-refresh-result', handler)
+    }
+  },
+
   // 切换账号 - 写入凭证到本地 SSO 缓存
   switchAccount: (credentials: {
     accessToken: string

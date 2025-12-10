@@ -9,7 +9,7 @@ function App(): React.JSX.Element {
   const [currentPage, setCurrentPage] = useState<PageType>('home')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
   
-  const { loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh } = useAccountsStore()
+  const { loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh, handleBackgroundRefreshResult } = useAccountsStore()
   
   // 应用启动时加载数据并启动自动刷新
   useEffect(() => {
@@ -21,6 +21,16 @@ function App(): React.JSX.Element {
       stopAutoTokenRefresh()
     }
   }, [loadFromStorage, startAutoTokenRefresh, stopAutoTokenRefresh])
+
+  // 监听后台刷新结果
+  useEffect(() => {
+    const unsubscribe = window.api.onBackgroundRefreshResult((data) => {
+      handleBackgroundRefreshResult(data)
+    })
+    return () => {
+      unsubscribe()
+    }
+  }, [handleBackgroundRefreshResult])
 
   const renderPage = () => {
     switch (currentPage) {

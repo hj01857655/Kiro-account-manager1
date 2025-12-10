@@ -20,6 +20,7 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
     isLoading,
     accounts,
     importFromExportData,
+    importAccounts,
     selectedIds
   } = useAccountsStore()
 
@@ -44,25 +45,109 @@ export function AccountManager({ onBack }: AccountManagerProps): React.ReactNode
     setShowExportDialog(true)
   }
 
+  // 解析 CSV 行（处理引号和逗号）
+  const parseCSVLine = (line: string): string[] => {
+    const result: string[] = []
+    let current = ''
+    let inQuotes = false
+    
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i]
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"'
+          i++
+        } else {
+          inQuotes = !inQuotes
+        }
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim())
+        current = ''
+      } else {
+        current += char
+      }
+    }
+    result.push(current.trim())
+    return result
+  }
+
   // 导入
   const handleImport = async (): Promise<void> => {
-    const content = await window.api.importFromFile()
+    const fileData = await window.api.importFromFile()
 
-    if (content) {
-      try {
+    if (!fileData) return
+
+    const { content, format } = fileData
+
+    try {
+      if (format === 'json') {
+        // JSON 格式：完整导出数据
         const data = JSON.parse(content)
-
         if (data.version && data.accounts) {
           const result = importFromExportData(data)
           const skippedInfo = result.errors.find(e => e.id === 'skipped')
           const skippedMsg = skippedInfo ? `，${skippedInfo.error}` : ''
           alert(`导入完成：成功 ${result.success} 个${skippedMsg}`)
         } else {
-          alert('无效的导入文件格式')
+          alert('无效的 JSON 文件格式')
         }
-      } catch {
-        alert('解析导入文件失败')
+      } else if (format === 'csv') {
+        // CSV 格式：邮箱,昵称,登录方式,RefreshToken,ClientId,ClientSecret,Region
+        const lines = content.split('\n').filter(line => line.trim())
+        if (lines.length < 2) {
+          alert('CSV 文件为空或只有标题行')
+          return
+        }
+
+        // 跳过标题行，解析数据行
+        const items = lines.slice(1).map(line => {
+          const cols = parseCSVLine(line)
+          return {
+            email: cols[0] || '',
+            nickname: cols[1] || undefined,
+            idp: cols[2] || 'Google',
+            refreshToken: cols[3] || '',
+            clientId: cols[4] || '',
+            clientSecret: cols[5] || '',
+            region: cols[6] || 'us-east-1'
+          }
+        }).filter(item => item.email && item.refreshToken)
+
+        if (items.length === 0) {
+          alert('未找到有效的账号数据（需要邮箱和 RefreshToken）')
+          return
+        }
+
+        const result = importAccounts(items)
+        alert(`导入完成：成功 ${result.success} 个，失败 ${result.failed} 个`)
+      } else if (format === 'txt') {
+        // TXT 格式：每行一个账号，格式为 邮箱,RefreshToken 或 邮箱|RefreshToken
+        const lines = content.split('\n').filter(line => line.trim() && !line.startsWith('#'))
+        
+        const items = lines.map(line => {
+          // 支持逗号或竖线分隔
+          const parts = line.includes('|') ? line.split('|') : line.split(',')
+          return {
+            email: parts[0]?.trim() || '',
+            refreshToken: parts[1]?.trim() || '',
+            nickname: parts[2]?.trim() || undefined,
+            idp: parts[3]?.trim() || 'Google'
+          }
+        }).filter(item => item.email && item.refreshToken)
+
+        if (items.length === 0) {
+          alert('未找到有效的账号数据（格式：邮箱,RefreshToken）')
+          return
+        }
+
+        const result = importAccounts(items)
+        alert(`导入完成：成功 ${result.success} 个，失败 ${result.failed} 个`)
+      } else {
+        alert(`不支持的文件格式：${format}`)
       }
+    } catch (e) {
+      console.error('Import error:', e)
+      alert('解析导入文件失败')
     }
   }
 

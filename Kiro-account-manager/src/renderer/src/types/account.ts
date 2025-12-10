@@ -4,7 +4,7 @@
 
 export type IdpType = 'Google' | 'Github' | 'BuilderId' | 'AWSIdC' | 'Internal'
 
-export type SubscriptionType = 'Free' | 'Pro' | 'Enterprise' | 'Teams'
+export type SubscriptionType = 'Free' | 'Pro' | 'Pro_Plus' | 'Enterprise'
 
 export type AccountStatus = 'active' | 'expired' | 'error' | 'refreshing' | 'unknown'
 
@@ -190,10 +190,13 @@ export interface AccountExportData {
  */
 export interface AccountImportItem {
   email: string
-  accessToken: string
-  csrfToken: string
-  refreshToken?: string
-  idp?: IdpType
+  refreshToken: string
+  accessToken?: string
+  csrfToken?: string
+  clientId?: string
+  clientSecret?: string
+  region?: string
+  idp?: IdpType | string
   nickname?: string
   groupId?: string
   tags?: string[]

@@ -12,7 +12,8 @@ import type {
   AccountImportItem,
   BatchOperationResult,
   AccountSubscription,
-  SubscriptionType
+  SubscriptionType,
+  IdpType
 } from '../types/account'
 
 // ============================================
@@ -57,6 +58,7 @@ interface AccountsState {
   // 自动刷新设置
   autoRefreshEnabled: boolean
   autoRefreshInterval: number // 分钟
+  autoRefreshConcurrency: number // 自动刷新并发数
   statusCheckInterval: number // 分钟
 
   // 隐私模式
@@ -70,6 +72,9 @@ interface AccountsState {
   autoSwitchEnabled: boolean
   autoSwitchThreshold: number // 余额阈值，低于此值时自动切换
   autoSwitchInterval: number // 检查间隔（分钟）
+
+  // 批量导入设置
+  batchImportConcurrency: number // 批量导入并发数
 
   // 主题设置
   theme: string // 主题名称: default, purple, emerald, orange, rose, cyan, amber
@@ -154,6 +159,7 @@ interface AccountsActions {
 
   // 设置
   setAutoRefresh: (enabled: boolean, interval?: number) => void
+  setAutoRefreshConcurrency: (concurrency: number) => void
   setStatusCheckInterval: (interval: number) => void
 
   // 隐私模式
@@ -171,6 +177,9 @@ interface AccountsActions {
 
   // 自动换号
   setAutoSwitch: (enabled: boolean, threshold?: number, interval?: number) => void
+
+  // 批量导入并发数
+  setBatchImportConcurrency: (concurrency: number) => void
   startAutoSwitch: () => void
   stopAutoSwitch: () => void
   checkAndAutoSwitch: () => Promise<void>
@@ -180,6 +189,8 @@ interface AccountsActions {
   stopAutoTokenRefresh: () => void
   checkAndRefreshExpiringTokens: () => Promise<void>
   refreshExpiredTokensOnly: () => Promise<void>
+  triggerBackgroundRefresh: () => Promise<void>
+  handleBackgroundRefreshResult: (data: { id: string; success: boolean; data?: unknown; error?: string }) => void
 
   // 定时自动保存（防止数据丢失）
   startAutoSave: () => void
@@ -222,6 +233,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   isSyncing: false,
   autoRefreshEnabled: true,
   autoRefreshInterval: 5,
+  autoRefreshConcurrency: 100,
   statusCheckInterval: 60,
   privacyMode: false,
   proxyEnabled: false,
@@ -229,6 +241,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   autoSwitchEnabled: false,
   autoSwitchThreshold: 0,
   autoSwitchInterval: 5,
+  batchImportConcurrency: 100,
   theme: 'default',
   darkMode: false,
 
@@ -737,6 +750,14 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   importAccounts: (items) => {
     const result: BatchOperationResult = { success: 0, failed: 0, errors: [] }
 
+    // 验证 idp 是否有效
+    const validIdps = ['Google', 'Github', 'BuilderId'] as const
+    const normalizeIdp = (idp?: string): IdpType => {
+      if (!idp) return 'Google'
+      const normalized = validIdps.find(v => v.toLowerCase() === idp.toLowerCase())
+      return normalized || 'Google'
+    }
+
     for (const item of items) {
       try {
         const now = Date.now()
@@ -744,11 +765,14 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         const account: Omit<Account, 'id' | 'createdAt' | 'isActive'> = {
           email: item.email,
           nickname: item.nickname,
-          idp: item.idp ?? 'Google',
+          idp: normalizeIdp(item.idp as string),
           credentials: {
-            accessToken: item.accessToken,
-            csrfToken: item.csrfToken,
+            accessToken: item.accessToken || '',
+            csrfToken: item.csrfToken || '',
             refreshToken: item.refreshToken,
+            clientId: item.clientId,
+            clientSecret: item.clientSecret,
+            region: item.region || 'us-east-1',
             expiresAt: now + 3600 * 1000
           },
           subscription: {
@@ -923,31 +947,54 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   batchRefreshTokens: async (ids) => {
-    const result: BatchOperationResult = { success: 0, failed: 0, errors: [] }
-
-    // 全量并发执行
-    const tasks = ids.map(async (id) => {
-      const success = await get().refreshAccountToken(id)
-      return { id, success }
-    })
-
-    const results = await Promise.allSettled(tasks)
-
-    for (const res of results) {
-      if (res.status === 'fulfilled' && res.value.success) {
-        result.success++
-      } else {
-        result.failed++
-        const id = res.status === 'fulfilled' ? res.value.id : 'unknown'
-        const account = get().accounts.get(id)
-        result.errors.push({
-          id,
-          error: account?.lastError ?? 'Refresh failed'
-        })
+    const { accounts, autoRefreshConcurrency } = get()
+    
+    // 收集需要刷新的账号
+    const accountsToRefresh: Array<{
+      id: string
+      email: string
+      credentials: {
+        refreshToken: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        accessToken?: string
       }
+    }> = []
+
+    for (const id of ids) {
+      const account = accounts.get(id)
+      if (!account?.credentials.refreshToken) continue
+      
+      accountsToRefresh.push({
+        id,
+        email: account.email,
+        credentials: {
+          refreshToken: account.credentials.refreshToken,
+          clientId: account.credentials.clientId,
+          clientSecret: account.credentials.clientSecret,
+          region: account.credentials.region,
+          authMethod: account.credentials.authMethod,
+          accessToken: account.credentials.accessToken
+        }
+      })
     }
 
-    return result
+    if (accountsToRefresh.length === 0) {
+      return { success: 0, failed: 0, errors: [] }
+    }
+
+    console.log(`[BatchRefresh] Triggering background refresh for ${accountsToRefresh.length} accounts...`)
+    
+    // 使用后台刷新 API（不阻塞 UI）
+    const result = await window.api.backgroundBatchRefresh(accountsToRefresh, autoRefreshConcurrency)
+    
+    return { 
+      success: result.successCount, 
+      failed: result.failedCount, 
+      errors: [] 
+    }
   },
 
   checkAccountStatus: async (id) => {
@@ -1041,37 +1088,54 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   },
 
   batchCheckStatus: async (ids) => {
-    const result: BatchOperationResult = { success: 0, failed: 0, errors: [] }
-
-    // 全量并发执行
-    const tasks = ids.map(async (id) => {
-      try {
-        await get().checkAccountStatus(id)
-        return { id, success: true }
-      } catch {
-        return { id, success: false }
+    const { accounts, autoRefreshConcurrency } = get()
+    
+    // 收集需要检查的账号（使用相同的后台刷新 API）
+    const accountsToCheck: Array<{
+      id: string
+      email: string
+      credentials: {
+        refreshToken: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        accessToken?: string
       }
-    })
+    }> = []
 
-    const results = await Promise.allSettled(tasks)
-
-    for (const res of results) {
-      if (res.status === 'fulfilled' && res.value.success) {
-        const account = get().accounts.get(res.value.id)
-        if (account?.status === 'active') {
-          result.success++
-        } else {
-          result.failed++
-          result.errors.push({ id: res.value.id, error: account?.lastError ?? 'Check failed' })
+    for (const id of ids) {
+      const account = accounts.get(id)
+      if (!account?.credentials.refreshToken) continue
+      
+      accountsToCheck.push({
+        id,
+        email: account.email,
+        credentials: {
+          refreshToken: account.credentials.refreshToken,
+          clientId: account.credentials.clientId,
+          clientSecret: account.credentials.clientSecret,
+          region: account.credentials.region,
+          authMethod: account.credentials.authMethod,
+          accessToken: account.credentials.accessToken
         }
-      } else {
-        result.failed++
-        const id = res.status === 'fulfilled' ? res.value.id : 'unknown'
-        result.errors.push({ id, error: 'Check failed' })
-      }
+      })
     }
 
-    return result
+    if (accountsToCheck.length === 0) {
+      return { success: 0, failed: 0, errors: [] }
+    }
+
+    console.log(`[BatchCheck] Triggering background check for ${accountsToCheck.length} accounts...`)
+    
+    // 使用后台刷新 API（会刷新 Token 并获取账号信息，不阻塞 UI）
+    const result = await window.api.backgroundBatchRefresh(accountsToCheck, autoRefreshConcurrency)
+    
+    return { 
+      success: result.successCount, 
+      failed: result.failedCount, 
+      errors: [] 
+    }
   },
 
   // ==================== 统计 ====================
@@ -1092,8 +1156,8 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       bySubscription: {
         Free: 0,
         Pro: 0,
-        Enterprise: 0,
-        Teams: 0
+        Pro_Plus: 0,
+        Enterprise: 0
       },
       byIdp: {
         Google: 0,
@@ -1238,6 +1302,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
           activeAccountId,
           autoRefreshEnabled: data.autoRefreshEnabled ?? true,
           autoRefreshInterval: data.autoRefreshInterval ?? 5,
+          autoRefreshConcurrency: data.autoRefreshConcurrency ?? 100,
           statusCheckInterval: data.statusCheckInterval ?? 60,
           privacyMode: data.privacyMode ?? false,
           proxyEnabled: data.proxyEnabled ?? false,
@@ -1287,6 +1352,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       activeAccountId,
       autoRefreshEnabled,
       autoRefreshInterval,
+      autoRefreshConcurrency,
       statusCheckInterval,
       privacyMode,
       proxyEnabled,
@@ -1311,6 +1377,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
         activeAccountId,
         autoRefreshEnabled,
         autoRefreshInterval,
+        autoRefreshConcurrency,
         statusCheckInterval,
         privacyMode,
         proxyEnabled,
@@ -1346,6 +1413,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     } else {
       get().stopAutoTokenRefresh()
     }
+  },
+
+  setAutoRefreshConcurrency: (concurrency) => {
+    set({ autoRefreshConcurrency: Math.max(1, Math.min(500, concurrency)) })
+    get().saveToStorage()
   },
 
   setStatusCheckInterval: (interval) => {
@@ -1449,6 +1521,11 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
     }
   },
 
+  setBatchImportConcurrency: (concurrency) => {
+    set({ batchImportConcurrency: Math.max(1, Math.min(500, concurrency)) })
+    get().saveToStorage()
+  },
+
   startAutoSwitch: () => {
     const { autoSwitchEnabled, autoSwitchInterval, checkAndAutoSwitch } = get()
     
@@ -1538,7 +1615,7 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
   // ==================== 自动 Token 刷新 ====================
 
   checkAndRefreshExpiringTokens: async () => {
-    const { accounts, refreshAccountToken, checkAccountStatus, autoSwitchEnabled } = get()
+    const { accounts, refreshAccountToken, checkAccountStatus, autoSwitchEnabled, autoRefreshConcurrency } = get()
     const now = Date.now()
 
     console.log(`[AutoRefresh] Checking ${accounts.size} accounts...`)
@@ -1561,40 +1638,53 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       accountsToProcess.push({ id, email: account.email, needsTokenRefresh: !!needsTokenRefresh })
     }
 
-    console.log(`[AutoRefresh] Processing ${accountsToProcess.length} accounts concurrently...`)
+    console.log(`[AutoRefresh] Processing ${accountsToProcess.length} accounts...`)
 
-    // 全量并发执行
-    const results = await Promise.allSettled(
-      accountsToProcess.map(async ({ id, email, needsTokenRefresh }) => {
-        try {
-          if (needsTokenRefresh) {
-            console.log(`[AutoRefresh] Refreshing token for ${email}...`)
-            await refreshAccountToken(id)
-            console.log(`[AutoRefresh] Token for ${email} refreshed`)
-            // Token 刷新后同步刷新账户信息
-            await checkAccountStatus(id)
-            console.log(`[AutoRefresh] Account info for ${email} updated`)
-          } else if (autoSwitchEnabled) {
-            // 仅在启用自动换号时才刷新账户信息（用于检测余额）
-            await checkAccountStatus(id)
-            console.log(`[AutoRefresh] Account info for ${email} updated (auto-switch enabled)`)
+    // 并发控制：使用配置的并发数，避免卡顿
+    const BATCH_SIZE = autoRefreshConcurrency
+    let successCount = 0
+    let failCount = 0
+
+    for (let i = 0; i < accountsToProcess.length; i += BATCH_SIZE) {
+      const batch = accountsToProcess.slice(i, i + BATCH_SIZE)
+      const results = await Promise.allSettled(
+        batch.map(async ({ id, email, needsTokenRefresh }) => {
+          try {
+            if (needsTokenRefresh) {
+              console.log(`[AutoRefresh] Refreshing token for ${email}...`)
+              await refreshAccountToken(id)
+              console.log(`[AutoRefresh] Token for ${email} refreshed`)
+              // Token 刷新后同步刷新账户信息
+              await checkAccountStatus(id)
+              console.log(`[AutoRefresh] Account info for ${email} updated`)
+            } else if (autoSwitchEnabled) {
+              // 仅在启用自动换号时才刷新账户信息（用于检测余额）
+              await checkAccountStatus(id)
+              console.log(`[AutoRefresh] Account info for ${email} updated (auto-switch enabled)`)
+            }
+            return { email, success: true }
+          } catch (e) {
+            console.error(`[AutoRefresh] Failed for ${email}:`, e)
+            return { email, success: false, error: e }
           }
-          return { email, success: true }
-        } catch (e) {
-          console.error(`[AutoRefresh] Failed for ${email}:`, e)
-          return { email, success: false, error: e }
-        }
-      })
-    )
+        })
+      )
+      
+      successCount += results.filter(r => r.status === 'fulfilled' && r.value.success).length
+      failCount += results.length - results.filter(r => r.status === 'fulfilled' && r.value.success).length
+      
+      // 批次间延迟
+      if (i + BATCH_SIZE < accountsToProcess.length) {
+        await new Promise(resolve => setTimeout(resolve, 200))
+      }
+    }
 
-    const successCount = results.filter(r => r.status === 'fulfilled' && r.value.success).length
-    const failCount = results.length - successCount
     console.log(`[AutoRefresh] Completed: ${successCount} success, ${failCount} failed`)
   },
 
   // 仅刷新失效的 Token（不刷新账户信息）
   refreshExpiredTokensOnly: async () => {
-    const { accounts, refreshAccountToken } = get()
+    const { accounts, refreshAccountToken, autoRefreshConcurrency } = get()
     const now = Date.now()
 
     // 筛选需要刷新 Token 的账号
@@ -1623,17 +1713,25 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
 
     console.log(`[AutoRefresh] Refreshing ${expiredAccounts.length} expired tokens...`)
 
-    // 并发刷新失效的 Token
-    await Promise.allSettled(
-      expiredAccounts.map(async ({ id, email }) => {
-        try {
-          await refreshAccountToken(id)
-          console.log(`[AutoRefresh] Token for ${email} refreshed`)
-        } catch (e) {
-          console.error(`[AutoRefresh] Failed to refresh token for ${email}:`, e)
-        }
-      })
-    )
+    // 并发控制：使用配置的并发数，避免卡顿
+    const BATCH_SIZE = autoRefreshConcurrency
+    for (let i = 0; i < expiredAccounts.length; i += BATCH_SIZE) {
+      const batch = expiredAccounts.slice(i, i + BATCH_SIZE)
+      await Promise.allSettled(
+        batch.map(async ({ id, email }) => {
+          try {
+            await refreshAccountToken(id)
+            console.log(`[AutoRefresh] Token for ${email} refreshed`)
+          } catch (e) {
+            console.error(`[AutoRefresh] Failed to refresh token for ${email}:`, e)
+          }
+        })
+      )
+      // 批次间延迟
+      if (i + BATCH_SIZE < expiredAccounts.length) {
+        await new Promise(resolve => setTimeout(resolve, 200))
+      }
+    }
   },
 
   startAutoTokenRefresh: () => {
@@ -1651,13 +1749,13 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       return
     }
 
-    // 启动时只检查并刷新失效的 token（不刷新账户信息）
-    get().refreshExpiredTokensOnly()
+    // 启动时触发后台刷新（在主进程执行，不阻塞 UI）
+    get().triggerBackgroundRefresh()
 
     // 使用用户设置的间隔（分钟转毫秒）
     const intervalMs = autoRefreshInterval * 60 * 1000
     tokenRefreshTimer = setInterval(() => {
-      get().checkAndRefreshExpiringTokens()
+      get().triggerBackgroundRefresh()
     }, intervalMs)
 
     console.log(`[AutoRefresh] Token auto-refresh started with interval: ${autoRefreshInterval} minutes`)
@@ -1669,6 +1767,109 @@ export const useAccountsStore = create<AccountsStore>()((set, get) => ({
       tokenRefreshTimer = null
       console.log('[AutoRefresh] Token auto-refresh stopped')
     }
+  },
+
+  // 触发后台刷新（在主进程执行，不阻塞 UI）
+  triggerBackgroundRefresh: async () => {
+    const { accounts, autoRefreshConcurrency } = get()
+    const now = Date.now()
+
+    // 筛选需要刷新 Token 的账号
+    const accountsToRefresh: Array<{
+      id: string
+      email: string
+      credentials: {
+        refreshToken: string
+        clientId?: string
+        clientSecret?: string
+        region?: string
+        authMethod?: string
+        accessToken?: string
+      }
+    }> = []
+    
+    for (const [id, account] of accounts) {
+      // 跳过已封禁或错误状态的账号
+      if (account.lastError?.includes('UnauthorizedException') || 
+          account.lastError?.includes('AccountSuspendedException')) {
+        continue
+      }
+
+      const expiresAt = account.credentials.expiresAt
+      const timeUntilExpiry = expiresAt ? expiresAt - now : Infinity
+      
+      // Token 已过期或即将过期
+      if (expiresAt && timeUntilExpiry <= TOKEN_REFRESH_BEFORE_EXPIRY) {
+        accountsToRefresh.push({
+          id,
+          email: account.email,
+          credentials: {
+            refreshToken: account.credentials.refreshToken || '',
+            clientId: account.credentials.clientId,
+            clientSecret: account.credentials.clientSecret,
+            region: account.credentials.region,
+            authMethod: account.credentials.authMethod,
+            accessToken: account.credentials.accessToken
+          }
+        })
+      }
+    }
+
+    if (accountsToRefresh.length === 0) {
+      console.log('[BackgroundRefresh] No accounts need refresh')
+      return
+    }
+
+    console.log(`[BackgroundRefresh] Triggering refresh for ${accountsToRefresh.length} accounts...`)
+    
+    // 调用主进程后台刷新，不等待结果（通过 IPC 事件接收）
+    window.api.backgroundBatchRefresh(accountsToRefresh, autoRefreshConcurrency)
+  },
+
+  // 处理后台刷新结果（由 App.tsx 调用）
+  handleBackgroundRefreshResult: (data) => {
+    const { id, success, data: resultData } = data
+    
+    if (!success) {
+      console.log(`[BackgroundRefresh] Account ${id} refresh failed:`, data.error)
+      return
+    }
+
+    // 更新账号状态
+    set((state) => {
+      const accounts = new Map(state.accounts)
+      const account = accounts.get(id)
+      
+      if (!account) return state
+
+      const now = Date.now()
+      const refreshData = resultData as {
+        accessToken?: string
+        refreshToken?: string
+        expiresIn?: number
+        usage?: { current?: number; limit?: number }
+        subscription?: { type?: string; title?: string }
+      } | undefined
+
+      accounts.set(id, {
+        ...account,
+        credentials: {
+          ...account.credentials,
+          accessToken: refreshData?.accessToken || account.credentials.accessToken,
+          refreshToken: refreshData?.refreshToken || account.credentials.refreshToken,
+          expiresAt: refreshData?.expiresIn ? now + refreshData.expiresIn * 1000 : account.credentials.expiresAt
+        },
+        usage: refreshData?.usage ? {
+          ...account.usage,
+          current: refreshData.usage.current ?? account.usage.current,
+          limit: refreshData.usage.limit ?? account.usage.limit,
+          lastUpdated: now
+        } : account.usage,
+        lastError: undefined
+      })
+
+      return { accounts }
+    })
   },
 
   // ==================== 定时自动保存 ====================

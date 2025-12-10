@@ -3,29 +3,15 @@ import { createPortal } from 'react-dom'
 import { Button, Badge } from '../ui'
 import { X, FileJson, FileText, Table, Clipboard, Check, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useAccountsStore } from '@/store/accounts'
+import type { Account } from '@/types/account'
 
 type ExportFormat = 'json' | 'txt' | 'csv' | 'clipboard'
 
 interface ExportDialogProps {
   open: boolean
   onClose: () => void
-  accounts: Array<{
-    email: string
-    nickname?: string
-    idp?: string
-    subscription?: {
-      type?: string
-      title?: string
-    }
-    usage?: {
-      current?: number
-      limit?: number
-    }
-    credentials?: {
-      refreshToken?: string
-      accessToken?: string
-    }
-  }>
+  accounts: Account[]
   selectedCount: number
 }
 
@@ -33,34 +19,50 @@ export function ExportDialog({ open, onClose, accounts, selectedCount }: ExportD
   const [selectedFormat, setSelectedFormat] = useState<ExportFormat>('json')
   const [includeCredentials, setIncludeCredentials] = useState(true)
   const [copied, setCopied] = useState(false)
+  const { exportAccounts } = useAccountsStore()
 
   if (!open) return null
 
   const formats: { id: ExportFormat; name: string; icon: typeof FileJson; desc: string }[] = [
     { id: 'json', name: 'JSON', icon: FileJson, desc: '完整数据，可用于导入' },
-    { id: 'txt', name: 'TXT', icon: FileText, desc: '纯文本格式，每行一个账号' },
-    { id: 'csv', name: 'CSV', icon: Table, desc: 'Excel 兼容格式' },
-    { id: 'clipboard', name: '剪贴板', icon: Clipboard, desc: '复制到剪贴板' },
+    { id: 'txt', name: 'TXT', icon: FileText, desc: includeCredentials ? '可导入格式：邮箱,Token,昵称,登录方式' : '纯文本格式，每行一个账号' },
+    { id: 'csv', name: 'CSV', icon: Table, desc: includeCredentials ? '可导入格式，Excel 兼容' : 'Excel 兼容格式' },
+    { id: 'clipboard', name: '剪贴板', icon: Clipboard, desc: includeCredentials ? '可导入格式：邮箱,Token' : '复制到剪贴板' },
   ]
 
   // 生成导出内容
   const generateContent = (format: ExportFormat): string => {
     switch (format) {
       case 'json':
-        return JSON.stringify({
-          version: '1.0',
-          exportedAt: new Date().toISOString(),
-          accounts: accounts.map(acc => ({
-            email: acc.email,
-            nickname: acc.nickname,
-            idp: acc.idp,
-            subscription: acc.subscription,
-            usage: acc.usage,
-            ...(includeCredentials ? { credentials: acc.credentials } : {})
+        // 使用 store 的 exportAccounts 函数导出完整数据
+        const exportData = exportAccounts(accounts.map(a => a.id))
+        // 如果不包含凭证，移除敏感信息
+        if (!includeCredentials) {
+          exportData.accounts = exportData.accounts.map(acc => ({
+            ...acc,
+            credentials: {
+              ...acc.credentials,
+              accessToken: '',
+              refreshToken: '',
+              csrfToken: ''
+            }
           }))
-        }, null, 2)
+        }
+        return JSON.stringify(exportData, null, 2)
 
       case 'txt':
+        if (includeCredentials) {
+          // 包含凭证时导出可导入格式：邮箱,RefreshToken,昵称,登录方式
+          return accounts.map(acc => 
+            [
+              acc.email,
+              acc.credentials?.refreshToken || '',
+              acc.nickname || '',
+              acc.idp || 'Google'
+            ].join(',')
+          ).join('\n')
+        }
+        // 不包含凭证时导出摘要信息
         return accounts.map(acc => {
           const lines = [
             `邮箱: ${acc.email}`,
@@ -73,22 +75,43 @@ export function ExportDialog({ open, onClose, accounts, selectedCount }: ExportD
         }).join('\n\n---\n\n')
 
       case 'csv':
-        const headers = ['邮箱', '昵称', '登录方式', '订阅类型', '订阅标题', '已用量', '总额度']
-        const rows = accounts.map(acc => [
-          acc.email,
-          acc.nickname || '',
-          acc.idp || '',
-          acc.subscription?.type || '',
-          acc.subscription?.title || '',
-          String(acc.usage?.current ?? ''),
-          String(acc.usage?.limit ?? '')
-        ])
+        // CSV 格式：包含凭证时可用于导入
+        const headers = includeCredentials 
+          ? ['邮箱', '昵称', '登录方式', 'RefreshToken', 'ClientId', 'ClientSecret', 'Region']
+          : ['邮箱', '昵称', '登录方式', '订阅类型', '订阅标题', '已用量', '总额度']
+        const rows = accounts.map(acc => includeCredentials 
+          ? [
+              acc.email,
+              acc.nickname || '',
+              acc.idp || '',
+              acc.credentials?.refreshToken || '',
+              acc.credentials?.clientId || '',
+              acc.credentials?.clientSecret || '',
+              acc.credentials?.region || 'us-east-1'
+            ]
+          : [
+              acc.email,
+              acc.nickname || '',
+              acc.idp || '',
+              acc.subscription?.type || '',
+              acc.subscription?.title || '',
+              String(acc.usage?.current ?? ''),
+              String(acc.usage?.limit ?? '')
+            ]
+        )
         // 添加 BOM 以支持 Excel 中文
         return '\ufeff' + [headers, ...rows].map(row => 
           row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')
         ).join('\n')
 
       case 'clipboard':
+        if (includeCredentials) {
+          // 包含凭证时导出可导入格式：邮箱,RefreshToken
+          return accounts.map(acc => 
+            `${acc.email},${acc.credentials?.refreshToken || ''}`
+          ).join('\n')
+        }
+        // 不包含凭证时导出摘要信息
         return accounts.map(acc => 
           `${acc.email}${acc.nickname ? ` (${acc.nickname})` : ''} - ${acc.subscription?.title || '未知订阅'}`
         ).join('\n')

@@ -4,10 +4,10 @@ import type { AccountFilter as FilterType, SubscriptionType, AccountStatus, IdpT
 import { cn } from '@/lib/utils'
 
 const SubscriptionOptions: { value: SubscriptionType; label: string }[] = [
-  { value: 'Free', label: 'Free' },
-  { value: 'Pro', label: 'Pro' },
-  { value: 'Enterprise', label: 'Enterprise' },
-  { value: 'Teams', label: 'Teams' }
+  { value: 'Free', label: 'KIRO FREE' },
+  { value: 'Pro', label: 'KIRO PRO' },
+  { value: 'Pro_Plus', label: 'KIRO PRO+' },
+  { value: 'Enterprise', label: 'KIRO POWER' }
 ]
 
 const StatusOptions: { value: AccountStatus; label: string }[] = [

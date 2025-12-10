@@ -1288,6 +1288,141 @@ app.whenReady().then(() => {
     }
   })
 
+  // IPC: 后台批量刷新账号（在主进程执行，不阻塞 UI）
+  ipcMain.handle('background-batch-refresh', async (_event, accounts: Array<{
+    id: string
+    email: string
+    credentials: {
+      refreshToken: string
+      clientId?: string
+      clientSecret?: string
+      region?: string
+      authMethod?: string
+      accessToken?: string
+    }
+  }>, concurrency: number = 10) => {
+    console.log(`[BackgroundRefresh] Starting batch refresh for ${accounts.length} accounts, concurrency: ${concurrency}`)
+    
+    let completed = 0
+    let success = 0
+    let failed = 0
+
+    // 串行处理每批，避免并发过高
+    for (let i = 0; i < accounts.length; i += concurrency) {
+      const batch = accounts.slice(i, i + concurrency)
+      
+      await Promise.allSettled(
+        batch.map(async (account) => {
+          try {
+            const { refreshToken, clientId, clientSecret, region, authMethod, accessToken } = account.credentials
+            
+            if (!refreshToken) {
+              failed++
+              completed++
+              return
+            }
+
+            // 刷新 Token
+            const refreshResult = await refreshTokenByMethod(
+              refreshToken,
+              clientId || '',
+              clientSecret || '',
+              region || 'us-east-1',
+              authMethod
+            )
+
+            if (!refreshResult.success) {
+              failed++
+              completed++
+              // 通知渲染进程刷新失败
+              mainWindow?.webContents.send('background-refresh-result', {
+                id: account.id,
+                success: false,
+                error: refreshResult.error
+              })
+              return
+            }
+
+            // 获取账号信息
+            const newAccessToken = refreshResult.accessToken || accessToken
+            if (!newAccessToken) {
+              failed++
+              completed++
+              return
+            }
+
+            // 调用 API 获取用量和订阅信息
+            const [usageRes, subscriptionRes] = await Promise.allSettled([
+              fetch(KIRO_API_BASE, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${newAccessToken}`,
+                  'X-Operation-Name': 'GetUsage'
+                },
+                body: JSON.stringify({})
+              }),
+              fetch(KIRO_API_BASE, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${newAccessToken}`,
+                  'X-Operation-Name': 'GetSubscription'
+                },
+                body: JSON.stringify({})
+              })
+            ])
+
+            const usageData = usageRes.status === 'fulfilled' && usageRes.value.ok 
+              ? await usageRes.value.json() : null
+            const subscriptionData = subscriptionRes.status === 'fulfilled' && subscriptionRes.value.ok 
+              ? await subscriptionRes.value.json() : null
+
+            success++
+            completed++
+
+            // 通知渲染进程更新账号
+            mainWindow?.webContents.send('background-refresh-result', {
+              id: account.id,
+              success: true,
+              data: {
+                accessToken: newAccessToken,
+                refreshToken: refreshResult.refreshToken,
+                expiresIn: refreshResult.expiresIn,
+                usage: usageData,
+                subscription: subscriptionData
+              }
+            })
+          } catch (e) {
+            failed++
+            completed++
+            mainWindow?.webContents.send('background-refresh-result', {
+              id: account.id,
+              success: false,
+              error: e instanceof Error ? e.message : 'Unknown error'
+            })
+          }
+        })
+      )
+
+      // 通知进度
+      mainWindow?.webContents.send('background-refresh-progress', {
+        completed,
+        total: accounts.length,
+        success,
+        failed
+      })
+
+      // 批次间延迟，让主进程有喘息时间
+      if (i + concurrency < accounts.length) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+
+    console.log(`[BackgroundRefresh] Completed: ${success} success, ${failed} failed`)
+    return { success: true, completed, successCount: success, failedCount: failed }
+  })
+
   // IPC: 导出到文件
   ipcMain.handle('export-to-file', async (_event, data: string, filename: string) => {
     try {
@@ -1313,13 +1448,20 @@ app.whenReady().then(() => {
     try {
       const result = await dialog.showOpenDialog(mainWindow!, {
         title: '导入账号数据',
-        filters: [{ name: 'JSON Files', extensions: ['json'] }],
+        filters: [
+          { name: '所有支持的格式', extensions: ['json', 'csv', 'txt'] },
+          { name: 'JSON Files', extensions: ['json'] },
+          { name: 'CSV Files', extensions: ['csv'] },
+          { name: 'TXT Files', extensions: ['txt'] }
+        ],
         properties: ['openFile']
       })
 
       if (!result.canceled && result.filePaths.length > 0) {
-        const content = await readFile(result.filePaths[0], 'utf-8')
-        return content
+        const filePath = result.filePaths[0]
+        const content = await readFile(filePath, 'utf-8')
+        const ext = filePath.split('.').pop()?.toLowerCase() || 'json'
+        return { content, format: ext }
       }
       return null
     } catch (error) {

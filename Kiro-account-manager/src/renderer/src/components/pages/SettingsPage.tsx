@@ -1,6 +1,6 @@
 import { useAccountsStore } from '@/store/accounts'
 import { Card, CardContent, CardHeader, CardTitle, Button } from '../ui'
-import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database } from 'lucide-react'
+import { Eye, EyeOff, RefreshCw, Clock, Trash2, Download, Upload, Globe, Repeat, Palette, Moon, Sun, Fingerprint, Info, ChevronDown, ChevronUp, Settings, Database, Layers } from 'lucide-react'
 import { useState } from 'react'
 import { ExportDialog } from '../accounts/ExportDialog'
 
@@ -60,7 +60,9 @@ export function SettingsPage() {
     setPrivacyMode,
     autoRefreshEnabled,
     autoRefreshInterval,
+    autoRefreshConcurrency,
     setAutoRefresh,
+    setAutoRefreshConcurrency,
     proxyEnabled,
     proxyUrl,
     setProxy,
@@ -68,6 +70,8 @@ export function SettingsPage() {
     autoSwitchThreshold,
     autoSwitchInterval,
     setAutoSwitch,
+    batchImportConcurrency,
+    setBatchImportConcurrency,
     theme,
     darkMode,
     setTheme,
@@ -88,11 +92,13 @@ export function SettingsPage() {
   const handleImport = async () => {
     setIsImporting(true)
     try {
-      const result = await window.api.importFromFile()
-      if (result) {
-        const data = JSON.parse(result)
+      const fileData = await window.api.importFromFile()
+      if (fileData && fileData.format === 'json') {
+        const data = JSON.parse(fileData.content)
         const importResult = importFromExportData(data)
         alert(`导入完成：成功 ${importResult.success} 个，失败 ${importResult.failed} 个`)
+      } else if (fileData) {
+        alert('设置页面仅支持 JSON 格式导入，请使用账号管理页面导入 CSV/TXT')
       }
     } catch (e) {
       alert(`导入失败: ${e instanceof Error ? e.message : '未知错误'}`)
@@ -291,6 +297,20 @@ export function SettingsPage() {
                   <option value="60">60 分钟</option>
                 </select>
               </div>
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div>
+                  <p className="font-medium">刷新并发数</p>
+                  <p className="text-sm text-muted-foreground">同时刷新的账号数量，过大可能卡顿</p>
+                </div>
+                <input
+                  type="number"
+                  className="w-24 h-9 px-3 rounded-lg border bg-background text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+                  value={autoRefreshConcurrency}
+                  min={1}
+                  max={500}
+                  onChange={(e) => setAutoRefreshConcurrency(parseInt(e.target.value) || 50)}
+                />
+              </div>
             </>
           )}
         </CardContent>
@@ -411,6 +431,37 @@ export function SettingsPage() {
               </div>
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 批量导入设置 */}
+      <Card className="border-0 shadow-sm hover:shadow-md transition-shadow duration-200">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-primary/10">
+              <Layers className="h-4 w-4 text-primary" />
+            </div>
+            批量导入
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-medium">并发数</p>
+              <p className="text-sm text-muted-foreground">同时验证的账号数量，过大可能导致 API 限流</p>
+            </div>
+            <input
+              type="number"
+              className="w-24 h-9 px-3 rounded-lg border bg-background text-sm text-center focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary"
+              value={batchImportConcurrency}
+              min={1}
+              max={500}
+              onChange={(e) => setBatchImportConcurrency(parseInt(e.target.value) || 100)}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-2">
+            建议范围: 10-100。设置过大可能导致大量「验证失败」，设置过小则导入速度较慢。
+          </p>
         </CardContent>
       </Card>
 
